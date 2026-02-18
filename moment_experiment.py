@@ -363,7 +363,7 @@ def main():
     ax_t2.legend(fontsize=8)
     ax_t2.set_xlabel("f (normalised)")
 
-    # Panel 2 (top-right) -- Learned P(t, f) with moments
+    # Panel 2 (top-centre) -- Learned P(t, f) with moments
     P_np = P.detach().cpu().numpy()
     vmin2 = np.percentile(P_np, 1)
     vmax2 = np.percentile(P_np, 99)
