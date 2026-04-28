@@ -1,0 +1,36 @@
+# Marginal-only baseline: single real Gabor
+
+condition_name: marginal_only_gabor
+output_root: results
+
+N: 128
+seed: 42
+
+signal:
+  name: real_gabor
+  params:
+    N: 128
+    f0: 10.0
+    sigma: 0.10
+    t0: 0.0
+
+model:
+  name: TFD_Network
+  params:
+    omega0: 30.0
+    hidden_dim: 256
+    hidden_layers: 3
+
+training:
+  num_epochs: 2000
+  lr: 1.0e-4
+  log_every: 200
+  record_every: 10
+
+# Loss weights (0.0 = disabled)
+lambdas:
+  marginal: 1.0
+  global_moment: 0.0
+  cond_f_mean: 0.0
+  cond_f_spread: 0.0
+  symmetry: 0.0

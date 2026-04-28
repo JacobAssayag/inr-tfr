@@ -1,0 +1,37 @@
+# Marginal-only baseline: two real Gabors
+
+condition_name: marginal_only_two_gabors
+output_root: results
+
+N: 128
+seed: 42
+
+signal:
+  name: two_real_gabors
+  params:
+    N: 128
+    f0: 8.0
+    f1: 20.0
+    sigma: 0.08
+    t0: -0.15
+    t1: 0.15
+
+model:
+  name: TFD_Network
+  params:
+    omega0: 30.0
+    hidden_dim: 256
+    hidden_layers: 3
+
+training:
+  num_epochs: 2000
+  lr: 1.0e-4
+  log_every: 200
+  record_every: 10
+
+lambdas:
+  marginal: 1.0
+  global_moment: 0.0
+  cond_f_mean: 0.0
+  cond_f_spread: 0.0
+  symmetry: 0.0
