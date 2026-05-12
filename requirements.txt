@@ -1,0 +1,11 @@
+# Core scientific stack
+numpy
+matplotlib
+torch
+pyyaml
+
+# Data handling and analysis
+pandas
+
+# Dashboard
+streamlit>=1.28
