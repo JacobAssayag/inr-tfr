@@ -21,6 +21,7 @@ What the dashboard shows
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,42 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# Input sanitization helpers
+# ---------------------------------------------------------------------------
+
+_SAFE_RUN_ID_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+
+_ALLOWED_RESULTS_ROOT = Path.cwd()  # restrict browsing to the working tree
+
+
+def _sanitize_run_id(user_input: str) -> str:
+    """Allow only alphanumeric characters, hyphens, and underscores.
+
+    Any other character is replaced with '_'.  The result is capped at
+    100 characters so it never becomes an unreasonably long path segment.
+    """
+    cleaned = _SAFE_RUN_ID_RE.sub("_", user_input.strip())
+    return cleaned[:100]
+
+
+def _sanitize_results_dir(user_input: str) -> Path:
+    """Return a resolved Path that stays within the working directory tree.
+
+    Raises ValueError if the resolved path escapes the working directory.
+    """
+    candidate = Path(user_input.strip()).expanduser().resolve()
+    # Guard against directory traversal: path must start with the cwd root.
+    try:
+        candidate.relative_to(_ALLOWED_RESULTS_ROOT)
+    except ValueError:
+        raise ValueError(
+            f"Results directory must be inside the working directory "
+            f"({_ALLOWED_RESULTS_ROOT}).  Got: {candidate}"
+        )
+    return candidate
 
 # ---------------------------------------------------------------------------
 # Page config — must be the first Streamlit call
@@ -52,8 +89,11 @@ st.set_page_config(
 @st.cache_data(ttl=10)
 def load_summary(results_dir: str) -> pd.DataFrame:
     """Scan *results_dir* and return one row per completed run."""
-    root = Path(results_dir).expanduser().resolve()
-    if not root.exists():
+    try:
+        root = _sanitize_results_dir(results_dir)
+    except ValueError:
+        return pd.DataFrame()
+    if not root.is_dir():
         return pd.DataFrame()
 
     records = []
@@ -613,6 +653,15 @@ with tab_launch:
 
         # ---- Handle form submission ------------------------------------
         if submitted:
+            # Sanitize free-text inputs before passing to subprocess
+            try:
+                safe_results_dir = str(_sanitize_results_dir(out_results_dir))
+            except ValueError as exc:
+                st.error(f"Invalid results directory: {exc}")
+                st.stop()
+
+            safe_run_id = _sanitize_run_id(custom_run_id) if custom_run_id.strip() else ""
+
             cmd = [
                 sys.executable, str(runner_path),
                 "--signal_type", "chirp",
@@ -626,10 +675,10 @@ with tab_launch:
                 "--num_epochs", str(num_epochs),
                 "--lambda_moment", str(lambda_moment),
                 "--seed", str(int(seed)),
-                "--results_dir", out_results_dir,
+                "--results_dir", safe_results_dir,
             ]
-            if custom_run_id.strip():
-                cmd += ["--run_id", custom_run_id.strip()]
+            if safe_run_id:
+                cmd += ["--run_id", safe_run_id]
 
             with st.expander("Command being run", expanded=False):
                 st.code(" ".join(cmd), language="bash")
