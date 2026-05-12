@@ -614,6 +614,12 @@ def build_parser():
     p.add_argument("--run_id", default=None,
                    help="Run identifier "
                         "(auto-generated from timestamp if omitted).")
+
+    # Config-file shortcut (used by the dashboard to avoid passing user
+    # strings on the command line)
+    p.add_argument("--config-file", dest="config_file", default=None,
+                   help="Path to a YAML file whose keys override all other "
+                        "flags.  Used internally by dashboard.py.")
     return p
 
 
@@ -621,6 +627,13 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     cfg = vars(args)
+
+    # If a config file was supplied, load it and let it override CLI defaults
+    if cfg.get("config_file"):
+        with open(cfg["config_file"]) as fh:
+            file_cfg = yaml.safe_load(fh) or {}
+        cfg.update({k: v for k, v in file_cfg.items() if k in cfg})
+        cfg.pop("config_file", None)
 
     # Auto-generate run_id if not provided
     if cfg["run_id"] is None:

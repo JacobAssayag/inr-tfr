@@ -20,10 +20,13 @@ What the dashboard shows
   🚀 Launch         – configure and start a new experiment from the GUI
 """
 
+import datetime
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -39,9 +42,14 @@ import yaml
 # Input sanitization helpers
 # ---------------------------------------------------------------------------
 
+# Characters allowed in a run name
 _SAFE_RUN_ID_RE = re.compile(r"[^a-zA-Z0-9_\-]")
 
-_ALLOWED_RESULTS_ROOT = Path.cwd()  # restrict browsing to the working tree
+# Characters allowed in a results directory path segment (no dots — blocks ..)
+_SAFE_PATH_RE = re.compile(r"[^a-zA-Z0-9_\-/]")
+
+# All results directories must live inside the process working directory
+_CWD = Path.cwd().resolve()
 
 
 def _sanitize_run_id(user_input: str) -> str:
@@ -55,19 +63,19 @@ def _sanitize_run_id(user_input: str) -> str:
 
 
 def _sanitize_results_dir(user_input: str) -> Path:
-    """Return a resolved Path that stays within the working directory tree.
+    """Return a safe Path anchored inside the working directory.
 
-    Raises ValueError if the resolved path escapes the working directory.
+    Only alphanumeric characters, hyphens, underscores, and forward slashes
+    are kept (dots are removed, which prevents any ``..`` traversal).  The
+    resulting path is always joined onto ``_CWD`` so it can never escape the
+    working tree.
     """
-    candidate = Path(user_input.strip()).expanduser().resolve()
-    # Guard against directory traversal: path must start with the cwd root.
-    try:
-        candidate.relative_to(_ALLOWED_RESULTS_ROOT)
-    except ValueError:
-        raise ValueError(
-            f"Results directory must be inside the working directory "
-            f"({_ALLOWED_RESULTS_ROOT}).  Got: {candidate}"
-        )
+    safe_str = _SAFE_PATH_RE.sub("", user_input.strip()).strip("/") or "results"
+    # Join onto the fixed CWD so the path is always within the working tree
+    candidate = (_CWD / safe_str).resolve()
+    # Belt-and-suspenders: verify the resolved path still starts with _CWD
+    if not str(candidate).startswith(str(_CWD)):
+        candidate = _CWD / "results"
     return candidate
 
 # ---------------------------------------------------------------------------
@@ -89,10 +97,7 @@ st.set_page_config(
 @st.cache_data(ttl=10)
 def load_summary(results_dir: str) -> pd.DataFrame:
     """Scan *results_dir* and return one row per completed run."""
-    try:
-        root = _sanitize_results_dir(results_dir)
-    except ValueError:
-        return pd.DataFrame()
+    root = _sanitize_results_dir(results_dir)
     if not root.is_dir():
         return pd.DataFrame()
 
@@ -632,9 +637,11 @@ with tab_launch:
             col7, col8 = st.columns(2)
             with col7:
                 out_results_dir = st.text_input(
-                    "Results directory",
-                    value=results_dir,
-                    help="Where to save this run.",
+                    "Results sub-folder",
+                    value="results",
+                    help="Sub-folder name inside the project directory where "
+                         "this run will be saved.  Only letters, numbers, "
+                         "hyphens, and underscores are allowed.",
                 )
             with col8:
                 custom_run_id = st.text_input(
@@ -653,79 +660,112 @@ with tab_launch:
 
         # ---- Handle form submission ------------------------------------
         if submitted:
-            # Sanitize free-text inputs before passing to subprocess
+            # Sanitize free-text inputs
+            safe_results_dir = _sanitize_results_dir(out_results_dir)
+            safe_run_id = (
+                _sanitize_run_id(custom_run_id)
+                if custom_run_id.strip() else ""
+            )
+
+            # Build the full config dict (all typed/numeric values from
+            # Streamlit widgets — no raw user strings)
+            run_cfg: dict = {
+                "signal_type": "chirp",
+                "N": int(N),
+                "k": float(k),
+                "sigma": float(sigma),
+                "t0": float(t0),
+                "omega0": float(omega0),
+                "loss_type": str(loss_type),
+                "lr": float(lr),
+                "num_epochs": int(num_epochs),
+                "lambda_moment": float(lambda_moment),
+                "seed": int(seed),
+                "log_every": 200,
+                "results_dir": str(safe_results_dir),
+                "run_id": (
+                    safe_run_id
+                    if safe_run_id
+                    else f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                      f"_{loss_type}"
+                ),
+            }
+
+            # Write config to a server-generated temp file so that no
+            # user-supplied strings appear on the subprocess command line
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".yaml")
             try:
-                safe_results_dir = str(_sanitize_results_dir(out_results_dir))
-            except ValueError as exc:
-                st.error(f"Invalid results directory: {exc}")
-                st.stop()
+                with os.fdopen(tmp_fd, "w") as fh:
+                    yaml.dump(run_cfg, fh)
 
-            safe_run_id = _sanitize_run_id(custom_run_id) if custom_run_id.strip() else ""
+                # Only the fixed runner path and the server-generated temp
+                # path are on the command line — no user input
+                cmd = [
+                    sys.executable,
+                    str(runner_path),
+                    "--config-file", tmp_path,
+                ]
 
-            cmd = [
-                sys.executable, str(runner_path),
-                "--signal_type", "chirp",
-                "--N", str(N),
-                "--k", str(k),
-                "--sigma", str(sigma),
-                "--t0", str(t0),
-                "--omega0", str(omega0),
-                "--loss_type", loss_type,
-                "--lr", str(lr),
-                "--num_epochs", str(num_epochs),
-                "--lambda_moment", str(lambda_moment),
-                "--seed", str(int(seed)),
-                "--results_dir", safe_results_dir,
-            ]
-            if safe_run_id:
-                cmd += ["--run_id", safe_run_id]
+                with st.expander("Configuration being used", expanded=False):
+                    st.json(run_cfg)
 
-            with st.expander("Command being run", expanded=False):
-                st.code(" ".join(cmd), language="bash")
-
-            with st.status("⚙️ Training in progress…", expanded=True) as status:
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        cwd=str(this_dir),
-                    )
-                    if result.returncode == 0:
-                        status.update(
-                            label="✅ Experiment complete!",
-                            state="complete",
-                            expanded=False,
+                with st.status(
+                    "⚙️ Training in progress…", expanded=True
+                ) as status:
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            cwd=str(this_dir),
                         )
-                        st.success("Training finished successfully!")
-                        with st.expander("📜 Training output", expanded=False):
-                            st.code(result.stdout, language=None)
-                        st.cache_data.clear()
-                        st.info(
-                            "Press **🔄 Refresh** in the sidebar to see "
-                            "this run in the Overview, Detail and Compare tabs."
-                        )
-                    else:
+                        if result.returncode == 0:
+                            status.update(
+                                label="✅ Experiment complete!",
+                                state="complete",
+                                expanded=False,
+                            )
+                            st.success("Training finished successfully!")
+                            with st.expander(
+                                "📜 Training output", expanded=False
+                            ):
+                                st.code(result.stdout, language=None)
+                            st.cache_data.clear()
+                            st.info(
+                                "Press **🔄 Refresh** in the sidebar to see "
+                                "this run in the Overview, Detail and "
+                                "Compare tabs."
+                            )
+                        else:
+                            status.update(
+                                label="❌ Experiment failed",
+                                state="error",
+                                expanded=True,
+                            )
+                            st.error(
+                                "Training failed — see the error output below."
+                            )
+                            st.code(
+                                result.stderr or result.stdout, language=None
+                            )
+
+                    except FileNotFoundError as exc:
                         status.update(
-                            label="❌ Experiment failed",
+                            label="❌ Script not found",
                             state="error",
-                            expanded=True,
                         )
-                        st.error(
-                            "Training failed — see the error output below."
+                        st.error(f"Could not start run_experiment.py: {exc}")
+
+                    except Exception as exc:
+                        status.update(
+                            label="❌ Unexpected error",
+                            state="error",
                         )
-                        st.code(result.stderr or result.stdout, language=None)
+                        st.error(f"Unexpected error: {exc}")
 
-                except FileNotFoundError as exc:
-                    status.update(
-                        label="❌ Script not found",
-                        state="error",
-                    )
-                    st.error(f"Could not start run_experiment.py: {exc}")
-
-                except Exception as exc:
-                    status.update(
-                        label="❌ Unexpected error",
-                        state="error",
-                    )
-                    st.error(f"Unexpected error: {exc}")
+            finally:
+                # Always clean up the temp config file
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
